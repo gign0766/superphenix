@@ -1038,7 +1038,7 @@ func (h *Service) kaasProfile(w http.ResponseWriter, r *http.Request, azConfig c
 		httpError.Http(w, r, http.StatusConflict).Str("az", azConfig.Code).Str("spxVersion", version).Msg("No KaaS configuration for this AZ version")
 	default:
 		log.Error().Err(err).Str("az", azConfig.Code).Msg("Cannot determine SPX version of AZ")
-		httpError.Http(w, r, http.StatusServiceUnavailable).Str("az", azConfig.Code).Str("reason", err.Error()).Msg("Cannot determine SPX version of AZ")
+		httpError.Http(w, r, http.StatusServiceUnavailable).Str("az", azConfig.Code).Msg("Cannot determine SPX version of AZ")
 	}
 	return config.KaasVersionProfile{}, false
 }
