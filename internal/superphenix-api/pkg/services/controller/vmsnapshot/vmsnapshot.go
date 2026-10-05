@@ -344,7 +344,7 @@ func (h *Service) DeleteVmSnapshot(w http.ResponseWriter, r *http.Request) {
 // RestoreVmSnapshot
 //
 //	@Summary		Restore a VM snapshot
-//	@Description	Restore a VM snapshot by creating a new instance from it
+//	@Description	Restore a VM snapshot onto its source instance, recreating it if it was deleted
 //	@Tags			v1, Superphenix Controller
 //	@Produce		json
 //	@Param			orgaId		path	string	true	"Organization ID"
@@ -352,10 +352,11 @@ func (h *Service) DeleteVmSnapshot(w http.ResponseWriter, r *http.Request) {
 //	@Param			projectId	path	string	true	"Project ID"
 //	@Param			effectiveId	path	string	true	"Snapshot EID"
 //	@Param			name		query	string	true	"New instance name"
-//	@Param			localId		query	string	true	"New instance local ID (UUID)"
+//	@Param			localId		query	string	true	"Local ID of the snapshot source instance"
 //	@Success		200
 //	@Failure		400
 //	@Failure		404
+//	@Failure		409
 //	@Failure		500
 //	@Router			/{orgaId}/api/spx-ctrl/{az}/{projectId}/instance-snapshot/{effectiveId}/restore [get]
 //	@Security		Bearer[OrganizationRead, ProjectSnapshotWrite, ProjectInstanceWrite]
@@ -365,6 +366,10 @@ func (h *Service) RestoreVmSnapshot(w http.ResponseWriter, r *http.Request) {
 	azDb, org, projectEntity, code, errMsg := ctrlutils.CheckPathParams(r)
 	if code != 0 {
 		httpError.Http(w, r, code).Msg(errMsg)
+		return
+	}
+
+	if !ctrlutils.CheckProductBelongsToProject(w, r, projectEntity.ID, azDb.Code) {
 		return
 	}
 
@@ -378,28 +383,15 @@ func (h *Service) RestoreVmSnapshot(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Check localId
+	// Check localId, it is a UUID for API instances and a name for GitOps instances.
+	// The controller checks that it identifies the instance targeted by the snapshot.
 	localId := r.URL.Query().Get("localId")
-	localIdUuid, err := uuid.Parse(localId)
-	if err != nil {
-		log.Err(err).Str("localId", localId).Msg("Failed to parse localId")
-		httpError.Http(w, r, consts.SpxResourceCreationFailureCode).Msg(consts.SpxResourceCreationFailure)
-		return
-	}
 	m := spxId.Metadata{}
-	if err = m.GenerateMetadata(projectEntity.ID.String(), org.ID.String(), localId); err != nil {
+	if err := m.GenerateMetadata(projectEntity.ID.String(), org.ID.String(), localId); err != nil {
 		log.Err(err).Str("localId", localId).Msg("Failed to generate metadata")
 		httpError.Http(w, r, consts.SpxResourceCreationFailureCode).Msg(consts.SpxResourceCreationFailure)
 		return
 	}
-
-	// TODO check if the localID provided is the good one (HOW ????)
-	//resourceEId := chi.URLParam(r, "effectiveId")
-	//if m.GetResourceEffectiveID() != resourceEId {
-	//	httpError.Http(w, r, consts.SpxResourceCreationFailureCode).Err(err).Str("effectiveId", resourceEId).Str("computeEid", m.GetResourceEffectiveID()).Msg(consts.SpxResourceCreationFailure)
-	//	return
-	//
-	//}
 
 	resp, err := proxy.SendProxy(r, azDb, config.ApiPrefix, http.NoBody)
 	if err != nil {
@@ -409,45 +401,81 @@ func (h *Service) RestoreVmSnapshot(w http.ResponseWriter, r *http.Request) {
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode == 200 || resp.StatusCode == 404 {
-		// Check if instance exist in db
-		var instance model.Product
-		result := db.Client.Unscoped().Where(model.Product{EffectiveID: m.GetResourceEffectiveID()}).First(&instance)
-
-		if result.Error != nil && !errors.Is(result.Error, gorm.ErrRecordNotFound) {
-			log.Err(result.Error).Str("effectiveId", m.GetResourceEffectiveID()).Msg("Failed to find product in database")
-			httpError.Http(w, r, consts.SpxResourceCreationFailureCode).Msg(consts.SpxResourceCreationFailure)
-			return
+	if resp.StatusCode != http.StatusOK {
+		// Keep client errors (invalid localId, snapshot not found) as such
+		failureCode := consts.SpxResourceCreationFailureCode
+		if resp.StatusCode == http.StatusBadRequest || resp.StatusCode == http.StatusNotFound {
+			failureCode = resp.StatusCode
 		}
-
-		if errors.Is(result.Error, gorm.ErrRecordNotFound) {
-			log.Debug().Msg("Instance not found, creation in db")
-			instance.ID = localIdUuid
-			instance.ProductName = name
-			instance.CodeAZ = azDb.Code
-			instance.ProjectId = projectEntity.ID
-			instance.ProductTypeId = model.ProductTypeInstance.Name
-			instance.EffectiveID = m.GetResourceEffectiveID()
-
-			_, err := product.Save(instance)
-			if err != nil {
-				log.Err(err).Msg("Failed to save product in database")
-				httpError.Http(w, r, consts.SpxResourceCreationFailureCode).Msg(consts.SpxResourceCreationFailure)
-				return
-			}
-		} else {
-			log.Debug().Msgf("Instance found, deletion status %t", instance.DeletedAt.Valid)
-			result = db.Client.Unscoped().Model(instance).Updates(map[string]interface{}{"deleted_at": nil, "product_name": name})
-			if result.Error != nil {
-				log.Debug().Err(result.Error).Msg("failed to restore instance in db")
-			}
-		}
-
-	} else {
-		ctrlutils.HandleControllerError(w, r, resp, consts.SpxResourceCreationFailureCode, consts.SpxResourceCreationFailure)
+		ctrlutils.HandleControllerError(w, r, resp, failureCode, consts.SpxResourceCreationFailure)
 		return
 	}
+
+	var target RestoreVmSnapshotAZControllerResponse
+	if err := json.NewDecoder(resp.Body).Decode(&target); err != nil {
+		log.Err(err).Msg("Failed to decode restore response")
+		httpError.Http(w, r, consts.SpxResourceCreationFailureCode).Msg(consts.SpxResourceCreationFailure)
+		return
+	}
+
+	// GitOps instances are not stored in database
+	if target.Gitops == "true" {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	// API instances always use their product ID as local ID
+	localIdUuid, err := uuid.Parse(localId)
+	if err != nil {
+		log.Warn().Str("localId", localId).Msg("Restored instance is not GitOps but its local ID is not a UUID, skipping database restore")
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	err = restoreInstanceInDb(localIdUuid, m.GetResourceEffectiveID(), name, azDb.Code, projectEntity.ID)
+	if errors.Is(err, errRestoreConflict) {
+		log.Warn().Str("localId", localId).Str("projectId", projectEntity.ID.String()).Msg("Cross-tenant restore target denied")
+		httpError.Http(w, r, http.StatusConflict).Str("localId", localId).Msg(consts.SpxResourceCreationFailure)
+		return
+	}
+	if err != nil {
+		log.Err(err).Str("localId", localId).Msg("Failed to restore instance in database")
+		httpError.Http(w, r, consts.SpxResourceCreationFailureCode).Msg(consts.SpxResourceCreationFailure)
+		return
+	}
+
 	w.WriteHeader(http.StatusOK)
+}
+
+var errRestoreConflict = errors.New("restore target conflicts with an existing product")
+
+// restoreInstanceInDb creates or undeletes the product row of a restored API instance.
+// A row is never overwritten: an existing row must already be this instance in this project.
+func restoreInstanceInDb(id uuid.UUID, effectiveId, name, azCode string, projectId uuid.UUID) error {
+	var existing model.Product
+	result := db.Client.Unscoped().Where("id = ?", id).First(&existing)
+	if errors.Is(result.Error, gorm.ErrRecordNotFound) {
+		_, err := product.Create(model.Product{
+			Model:         model.Model{ID: id},
+			ProductName:   name,
+			CodeAZ:        azCode,
+			ProjectId:     projectId,
+			ProductTypeId: model.ProductTypeInstance.Name,
+			EffectiveID:   effectiveId,
+		})
+		return err
+	}
+	if result.Error != nil {
+		return result.Error
+	}
+
+	if existing.ProjectId != projectId || existing.ProductTypeId != model.ProductTypeInstance.Name || existing.EffectiveID != effectiveId {
+		return errRestoreConflict
+	}
+
+	return db.Client.Unscoped().Model(&model.Product{}).
+		Where("id = ? AND project_id = ?", id, projectId).
+		Updates(map[string]any{"deleted_at": nil, "product_name": name}).Error
 }
 
 // CloneVmSnapshot
@@ -641,6 +669,13 @@ type CreateVmSnapshotSpxControllerBody struct {
 
 type CloneVmSnapshotBody struct {
 	Name string `json:"name" validate:"max=63"`
+}
+
+// RestoreVmSnapshotAZControllerResponse identifies the instance restored by superphenix-controller
+type RestoreVmSnapshotAZControllerResponse struct {
+	LocalId     string `json:"localId"`
+	EffectiveId string `json:"effectiveId"`
+	Gitops      string `json:"gitops"`
 }
 
 type CloneVmSnapshotAZControllerBody struct {

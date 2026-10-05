@@ -2,6 +2,8 @@ package vmSnapshot
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"strconv"
 	"time"
 
@@ -15,13 +17,48 @@ import (
 	"kubevirt.io/api/snapshot/v1beta1"
 )
 
-func RestoreVmSnapshot(ctx context.Context, orgId, projectId, name string) error {
+// ErrRestoreTargetMismatch is returned when the provided local ID does not identify the VM targeted by the snapshot
+var ErrRestoreTargetMismatch = errors.New("local ID does not match the snapshot source instance")
+
+// RestoreTarget identifies the instance restored by a snapshot
+type RestoreTarget struct {
+	LocalId     string `json:"localId"`
+	EffectiveId string `json:"effectiveId"`
+	Gitops      string `json:"gitops"`
+}
+
+// RestoreVmSnapshot restores the snapshot `name` onto its source VM.
+// localId must be the local ID of the snapshot source VM, otherwise ErrRestoreTargetMismatch is returned and nothing is restored.
+func RestoreVmSnapshot(ctx context.Context, orgId, projectId, name, localId string) (RestoreTarget, error) {
 	log := logger.GetLogger(ctx)
 	namespace := spxId.ToSPXID(projectId)
 	snapshot, err := GetVmSnapshot(ctx, namespace, name)
 	if err != nil {
 		log.Err(err).Msgf("Error getting vmSnapshot %s in namespace %s", name, namespace)
-		return err
+		return RestoreTarget{}, err
+	}
+
+	// The VM name is its effective ID, check that the local ID provided identifies the snapshot source VM
+	target := spxId.Metadata{}
+	if err := target.GenerateMetadata(projectId, orgId, localId); err != nil {
+		log.Err(err).Str("localId", localId).Msg("Invalid restore target local ID")
+		return RestoreTarget{}, fmt.Errorf("%w: %w", ErrRestoreTargetMismatch, err)
+	}
+	if snapshot.Spec.Source.Name != target.GetResourceEffectiveID() {
+		log.Warn().Str("localId", localId).Str("computedEid", target.GetResourceEffectiveID()).Str("sourceEid", snapshot.Spec.Source.Name).Msg("Restore target does not match snapshot source")
+		return RestoreTarget{}, ErrRestoreTargetMismatch
+	}
+
+	gitops := ""
+	if snapshot.Status.VirtualMachineSnapshotContentName != nil {
+		content, err := config.VirtClient.VirtualMachineSnapshotContent(namespace).Get(ctx, *snapshot.Status.VirtualMachineSnapshotContentName, k8smetav1.GetOptions{})
+		if err != nil {
+			log.Err(err).Str("namespace", namespace).Str("name", *snapshot.Status.VirtualMachineSnapshotContentName).Msg("Error getting vm snapshot content")
+			return RestoreTarget{}, err
+		}
+		if content.Spec.Source.VirtualMachine != nil {
+			gitops = content.Spec.Source.VirtualMachine.Labels[spxId.SpxLabelGitops]
+		}
 	}
 
 	now := strconv.FormatInt(time.Now().UTC().UnixMilli(), 10)
@@ -29,7 +66,7 @@ func RestoreVmSnapshot(ctx context.Context, orgId, projectId, name string) error
 
 	if err := m.GenerateMetadata(projectId, orgId, name+"-"+now); err != nil {
 		log.Err(err).Msg("Failed to generate metadata")
-		return err
+		return RestoreTarget{}, err
 	}
 
 	readinessPolicy := v1beta1.VirtualMachineRestoreStopTarget
@@ -55,8 +92,12 @@ func RestoreVmSnapshot(ctx context.Context, orgId, projectId, name string) error
 	}, k8smetav1.CreateOptions{})
 	if err != nil {
 		log.Err(err).Msgf("Error restoring vmSnapshot %s in namespace %s", name, namespace)
-		return err
+		return RestoreTarget{}, err
 	}
 
-	return nil
+	return RestoreTarget{
+		LocalId:     localId,
+		EffectiveId: target.GetResourceEffectiveID(),
+		Gitops:      gitops,
+	}, nil
 }

@@ -1645,12 +1645,12 @@ const docTemplate = `{
         },
         "/{orgId}/{projectId}/instance-snapshot/{effectiveId}/restore": {
             "get": {
-                "description": "Restore a VM Snapshot",
+                "description": "Restore a VM Snapshot onto its source instance",
                 "consumes": [
                     "application/json"
                 ],
                 "produces": [
-                    "text/plain"
+                    "application/json"
                 ],
                 "tags": [
                     "v1",
@@ -1671,14 +1671,34 @@ const docTemplate = `{
                         "name": "projectId",
                         "in": "path",
                         "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "Snapshot EID",
+                        "name": "effectiveId",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "Local ID of the snapshot source instance",
+                        "name": "localId",
+                        "in": "query",
+                        "required": true
                     }
                 ],
                 "responses": {
                     "200": {
-                        "description": "OK"
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/vmSnapshot.RestoreTarget"
+                        }
                     },
                     "400": {
                         "description": "Bad Request"
+                    },
+                    "404": {
+                        "description": "Not Found"
                     },
                     "500": {
                         "description": "Internal Server Error"
@@ -15457,6 +15477,20 @@ const docTemplate = `{
                     "type": "string"
                 },
                 "resourceLocalID": {
+                    "type": "string"
+                }
+            }
+        },
+        "vmSnapshot.RestoreTarget": {
+            "type": "object",
+            "properties": {
+                "effectiveId": {
+                    "type": "string"
+                },
+                "gitops": {
+                    "type": "string"
+                },
+                "localId": {
                     "type": "string"
                 }
             }

@@ -18,6 +18,12 @@ func Save(product model.Product) (model.Product, error) {
 	return product, result.Error
 }
 
+// Create inserts a new product and fails if its primary key already exists, unlike Save which would update it
+func Create(product model.Product) (model.Product, error) {
+	result := db.Client.Create(&product)
+	return product, result.Error
+}
+
 func SaveAll(products []model.Product) ([]model.Product, error) {
 	result := db.Client.Save(&products)
 	return products, result.Error

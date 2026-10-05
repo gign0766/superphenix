@@ -4015,7 +4015,7 @@ const docTemplate = `{
                         ]
                     }
                 ],
-                "description": "Restore a VM snapshot by creating a new instance from it",
+                "description": "Restore a VM snapshot onto its source instance, recreating it if it was deleted",
                 "produces": [
                     "application/json"
                 ],
@@ -4062,7 +4062,7 @@ const docTemplate = `{
                     },
                     {
                         "type": "string",
-                        "description": "New instance local ID (UUID)",
+                        "description": "Local ID of the snapshot source instance",
                         "name": "localId",
                         "in": "query",
                         "required": true
@@ -4077,6 +4077,9 @@ const docTemplate = `{
                     },
                     "404": {
                         "description": "Not Found"
+                    },
+                    "409": {
+                        "description": "Conflict"
                     },
                     "500": {
                         "description": "Internal Server Error"

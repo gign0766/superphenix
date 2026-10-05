@@ -2,6 +2,7 @@ package kubevirt
 
 import (
 	"encoding/json"
+	stderrors "errors"
 	"net/http"
 
 	"github.com/super-phenix/superphenix/internal/superphenix-controller/internal/k8s"
@@ -290,14 +291,17 @@ func cloneInstanceSnapshot(w http.ResponseWriter, r *http.Request) {
 // restoreInstanceSnapshot
 //
 //	@Summary		Restore a VM Snapshot
-//	@Description	Restore a VM Snapshot
+//	@Description	Restore a VM Snapshot onto its source instance
 //	@Tags			v1, VmSnapshot
 //	@Accept			json
-//	@Produce		plain
-//	@Param			orgId		path	string	true	"Organization ID"
-//	@Param			projectId	path	string	true	"Project ID"
-//	@Success		200
+//	@Produce		json
+//	@Param			orgId		path		string	true	"Organization ID"
+//	@Param			projectId	path		string	true	"Project ID"
+//	@Param			effectiveId	path		string	true	"Snapshot EID"
+//	@Param			localId		query		string	true	"Local ID of the snapshot source instance"
+//	@Success		200			{object}	vmSnapshot.RestoreTarget
 //	@Failure		400
+//	@Failure		404
 //	@Failure		500
 //	@Router			/{orgId}/{projectId}/instance-snapshot/{effectiveId}/restore [get]
 func restoreInstanceSnapshot(w http.ResponseWriter, r *http.Request) {
@@ -309,17 +313,26 @@ func restoreInstanceSnapshot(w http.ResponseWriter, r *http.Request) {
 	if effectiveId == "" {
 		log.Error().Msg("no Resource Effective Id provided")
 		httpError.Http(w, r, http.StatusBadRequest).Msg("no Resource Effective Id provided")
+		return
 	}
 
-	if err := vmSnapshot.RestoreVmSnapshot(r.Context(), orgId, projectId, effectiveId); err != nil {
+	localId := r.URL.Query().Get("localId")
+	target, err := vmSnapshot.RestoreVmSnapshot(r.Context(), orgId, projectId, effectiveId, localId)
+	if err != nil {
 		if errors.IsNotFound(err) {
 			log.Err(err).Msg("Resource not found")
 			httpError.Http(w, r, http.StatusNotFound).Msg("Resource not found")
 			return
 		}
+		if stderrors.Is(err, vmSnapshot.ErrRestoreTargetMismatch) {
+			httpError.Http(w, r, http.StatusBadRequest).Str("localId", localId).Msg(vmSnapshot.ErrRestoreTargetMismatch.Error())
+			return
+		}
 		log.Err(err).Msg("Failed to restore vm snapshot")
 		httpError.Http(w, r, http.StatusInternalServerError).Msg("Failed to restore vm snapshot")
-	} else {
-		w.WriteHeader(http.StatusOK)
+		return
 	}
+
+	b, _ := json.Marshal(target)
+	ch.Data(w, http.StatusOK, ch.MIMEJSON, b)
 }
