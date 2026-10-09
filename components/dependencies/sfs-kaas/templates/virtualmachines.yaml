@@ -219,6 +219,13 @@ spec:
                         {{- end }}
                       errorPolicy: "report"
                   {{- end }}
+                  {{- with $template.gpus }}
+                  gpus:
+                    {{- range $i, $gpu := . }}
+                    - deviceName: {{ get $.Values.deviceMapping $gpu.device | quote}}
+                      name: gpu-{{ $i }}
+                    {{- end }}
+                  {{- end }}
               volumes:
                 - name: boot-disk
                   dataVolume:
