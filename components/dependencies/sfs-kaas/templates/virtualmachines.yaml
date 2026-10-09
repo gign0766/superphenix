@@ -219,6 +219,13 @@ spec:
                         {{- end }}
                       errorPolicy: "report"
                   {{- end }}
+                  {{- with $template.gpus }}
+                  gpus:
+                    {{- range $i, $gpu := . }}
+                    - deviceName: {{ (get $.Values.deviceMapping $gpu.device) | required (printf "Could not find deviceMapping for device `%s`" $gpu.device) }}
+                      name: gpu-{{ $i }}
+                    {{- end }}
+                  {{- end }}
               volumes:
                 - name: boot-disk
                   dataVolume:
